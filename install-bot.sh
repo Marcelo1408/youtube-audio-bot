@@ -14,7 +14,7 @@ echo_info() { echo -e "${YELLOW}[INFO]${NC} $1"; }
 # CONFIGURAÇÕES FIXAS - NÃO MUDAM!
 # ============================================
 BOT_DIR="/opt/youtube-audio-bot"
-ZIP_URL="https://github.com/Marcelo1408/youtube-audio-bot/blob/dbadf3fcb29d41939956703b464c9163c2ebbfad/youtube-audio-bot.zip?raw=true"
+ZIP_URL="https://github.com/Marcelo1408/youtube-audio-bot/archive/5daa22fca8cc5e2aee35075a665c24d8e9f41fc8.zip"
 
 # ============================================
 # VERIFICAR ROOT
