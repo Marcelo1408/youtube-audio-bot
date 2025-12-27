@@ -1,0 +1,15 @@
+banco de dados
+npm install mysql2
+chmod +x install-mysql.sh
+sudo ./install-mysql.sh
+--------------------------------------------------------------------------------------------------------
+instalador install.sh
+
+chmod +x install.sh
+
+ 
+# Comando para baixar e executar o install-mysql.sh
+sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/Marcelo1408/youtube-audio-bot/ea36a511714a9a3f72e3407c9bf6efd671cbce15/install-mysql.sh)"
+
+ instale o bot completo:
+ sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/Marcelo1408/youtube-audio-bot/ea36a511714a9a3f72e3407c9bf6efd671cbce15/install-bot.sh)"

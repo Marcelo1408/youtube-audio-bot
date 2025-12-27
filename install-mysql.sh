@@ -32,9 +32,6 @@ fi
 
 print_step "🚀 INSTALANDO MYSQL PARA YOUTUBE AUDIO BOT"
 
-# URLs do GitHub
-SCHEMA_URL="https://raw.githubusercontent.com/Marcelo1408/youtube-audio-bot/ea36a511714a9a3f72e3407c9bf6efd671cbce15/schema.sql"
-
 # ============================================
 # PASSO 1: INSTALAR MYSQL 8.0
 # ============================================
@@ -119,24 +116,28 @@ chmod 600 /root/.bot_db_creds
 print_message "✅ Banco de dados e usuário criados"
 
 # ============================================
-# PASSO 4: BAIXAR E APLICAR SCHEMA SQL DO GITHUB
+# PASSO 4: APLICAR SCHEMA SQL
 # ============================================
-print_step "4. BAIXANDO E APLICANDO SCHEMA DO GITHUB"
+print_step "4. APLICANDO SCHEMA DO BANCO DE DADOS"
 
-print_message "Baixando schema.sql do GitHub..."
-if curl -fsSL "$SCHEMA_URL" -o /tmp/schema.sql; then
-    print_message "✅ schema.sql baixado com sucesso"
-    
-    # Verificar se o arquivo não está vazio
-    if [ ! -s /tmp/schema.sql ]; then
-        print_error "❌ schema.sql está vazio ou corrompido"
-        print_warning "Criando schema básico como fallback..."
-        
-        # Criar schema básico como fallback
-        cat > /tmp/schema.sql << 'EOF'
-CREATE DATABASE IF NOT EXISTS youtube_audio_bot CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+# Criar arquivo schema.sql
+cat > /tmp/schema.sql << 'EOF'
+-- Schema do YouTube Audio Bot
+-- Aplicar este schema após criar o banco de dados
+
 USE youtube_audio_bot;
 
+-- Remover tabelas existentes (se necessário)
+DROP TABLE IF EXISTS tracks;
+DROP TABLE IF EXISTS pix_payments;
+DROP TABLE IF EXISTS processings;
+DROP TABLE IF EXISTS transactions;
+DROP TABLE IF EXISTS system_logs;
+DROP TABLE IF EXISTS api_tokens;
+DROP TABLE IF EXISTS system_settings;
+DROP TABLE IF EXISTS users;
+
+-- Tabela de usuários
 CREATE TABLE users (
     id INT PRIMARY KEY AUTO_INCREMENT,
     telegram_id BIGINT UNIQUE NOT NULL,
@@ -145,23 +146,37 @@ CREATE TABLE users (
     last_name VARCHAR(100),
     coins INT DEFAULT 0,
     plan ENUM('free', 'essential', 'premium', 'deluxe', 'infinite') DEFAULT 'free',
+    plan_expires_at DATETIME,
     is_active BOOLEAN DEFAULT TRUE,
     is_admin BOOLEAN DEFAULT FALSE,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    INDEX idx_telegram_id (telegram_id),
+    INDEX idx_username (username),
+    INDEX idx_plan (plan)
 );
 
+-- Tabela de transações
 CREATE TABLE transactions (
     id INT PRIMARY KEY AUTO_INCREMENT,
     user_id INT NOT NULL,
-    type ENUM('purchase', 'video_processing', 'refund') NOT NULL,
+    telegram_id BIGINT,
+    type ENUM('purchase', 'video_processing', 'refund', 'admin_add', 'admin_remove') NOT NULL,
     amount DECIMAL(10, 2) NOT NULL,
     coins_amount INT NOT NULL,
     description VARCHAR(255),
-    status ENUM('pending', 'completed', 'failed') DEFAULT 'pending',
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    payment_id VARCHAR(100),
+    status ENUM('pending', 'completed', 'failed', 'refunded') DEFAULT 'pending',
+    metadata JSON,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    INDEX idx_user_id (user_id),
+    INDEX idx_status (status),
+    INDEX idx_payment_id (payment_id),
+    INDEX idx_created_at (created_at)
 );
 
+-- Tabela de processamentos
 CREATE TABLE processings (
     id INT PRIMARY KEY AUTO_INCREMENT,
     user_id INT NOT NULL,
@@ -170,76 +185,176 @@ CREATE TABLE processings (
     quality ENUM('low', 'medium', 'high', 'veryhigh') DEFAULT 'medium',
     format ENUM('mp3', 'wav', 'flac', 'm4a') DEFAULT 'mp3',
     status ENUM('pending', 'processing', 'completed', 'failed') DEFAULT 'pending',
+    tracks_count INT DEFAULT 0,
+    zip_file_path TEXT,
     coins_used INT DEFAULT 10,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    error_message TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    completed_at DATETIME,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    INDEX idx_user_id (user_id),
+    INDEX idx_status (status),
+    INDEX idx_created_at (created_at)
 );
 
-INSERT INTO users (telegram_id, username, first_name, coins, plan, is_admin) 
-VALUES (123456789, 'admin', 'Administrador', 999999, 'infinite', TRUE);
-EOF
-    fi
-    
-    # Aplicar schema
-    print_message "Aplicando schema ao banco de dados..."
-    if mysql --user=root --password="$MYSQL_ROOT_PASS" youtube_audio_bot < /tmp/schema.sql; then
-        print_message "✅ Schema aplicado com sucesso"
-        
-        # Verificar se as tabelas foram criadas
-        TABLE_COUNT=$(mysql --user=root --password="$MYSQL_ROOT_PASS" youtube_audio_bot -sN -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'youtube_audio_bot';")
-        print_message "✅ $TABLE_COUNT tabelas criadas no banco"
-        
-    else
-        print_error "❌ Erro ao aplicar schema"
-        print_warning "Verifique o arquivo schema.sql"
-    fi
-    
-else
-    print_error "❌ Falha ao baixar schema.sql do GitHub"
-    print_warning "URL: $SCHEMA_URL"
-    print_warning "Criando schema básico..."
-    
-    # Criar schema básico mínimo
-    mysql --user=root --password="$MYSQL_ROOT_PASS" << EOF
-USE youtube_audio_bot;
-
-CREATE TABLE IF NOT EXISTS users (
+-- Tabela de músicas extraídas
+CREATE TABLE tracks (
     id INT PRIMARY KEY AUTO_INCREMENT,
-    telegram_id BIGINT UNIQUE NOT NULL,
-    username VARCHAR(100) NOT NULL,
-    first_name VARCHAR(100),
-    coins INT DEFAULT 0,
-    plan VARCHAR(20) DEFAULT 'free',
-    is_admin BOOLEAN DEFAULT FALSE,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    processing_id INT NOT NULL,
+    track_number INT NOT NULL,
+    title VARCHAR(500),
+    start_time INT,
+    end_time INT,
+    file_path TEXT,
+    file_size BIGINT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (processing_id) REFERENCES processings(id) ON DELETE CASCADE,
+    INDEX idx_processing_id (processing_id),
+    INDEX idx_track_number (track_number)
 );
 
-CREATE TABLE IF NOT EXISTS processings (
+-- Tabela de pagamentos PIX
+CREATE TABLE pix_payments (
     id INT PRIMARY KEY AUTO_INCREMENT,
     user_id INT NOT NULL,
-    video_url TEXT NOT NULL,
-    status VARCHAR(20) DEFAULT 'pending',
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    transaction_id INT,
+    pix_code TEXT NOT NULL,
+    qr_code TEXT,
+    amount DECIMAL(10, 2) NOT NULL,
+    coins_amount INT NOT NULL,
+    plan_type VARCHAR(50),
+    status ENUM('pending', 'paid', 'expired', 'cancelled') DEFAULT 'pending',
+    expires_at DATETIME NOT NULL,
+    paid_at DATETIME,
+    payment_data JSON,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (transaction_id) REFERENCES transactions(id),
+    INDEX idx_user_id (user_id),
+    INDEX idx_status (status),
+    INDEX idx_expires_at (expires_at)
 );
 
-INSERT IGNORE INTO users (telegram_id, username, first_name, coins, plan, is_admin) 
-VALUES (123456789, 'admin', 'Administrador', 999999, 'infinite', TRUE);
+-- Tabela de configurações do sistema
+CREATE TABLE system_settings (
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    setting_key VARCHAR(100) UNIQUE NOT NULL,
+    setting_value TEXT,
+    setting_type ENUM('string', 'number', 'boolean', 'json') DEFAULT 'string',
+    description VARCHAR(255),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    INDEX idx_setting_key (setting_key)
+);
+
+-- Tabela de logs do sistema
+CREATE TABLE system_logs (
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    user_id INT,
+    log_type ENUM('info', 'warning', 'error', 'debug', 'payment', 'processing') NOT NULL,
+    message TEXT NOT NULL,
+    metadata JSON,
+    ip_address VARCHAR(45),
+    user_agent TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_log_type (log_type),
+    INDEX idx_created_at (created_at),
+    INDEX idx_user_id (user_id),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
+);
+
+-- Tabela de tokens de API
+CREATE TABLE api_tokens (
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    user_id INT NOT NULL,
+    token VARCHAR(255) UNIQUE NOT NULL,
+    name VARCHAR(100),
+    permissions JSON,
+    is_active BOOLEAN DEFAULT TRUE,
+    last_used_at DATETIME,
+    expires_at DATETIME,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    INDEX idx_token (token),
+    INDEX idx_user_id (user_id)
+);
+
+-- Inserir configurações padrão
+INSERT INTO system_settings (setting_key, setting_value, setting_type, description) VALUES
+('coins_per_video', '10', 'number', 'Moedas necessárias para processar um vídeo'),
+('max_file_size_mb', '50', 'number', 'Tamanho máximo do arquivo em MB'),
+('plan_essential_coins', '150', 'number', 'Moedas do plano Essencial'),
+('plan_essential_price', '19.90', 'number', 'Preço do plano Essencial'),
+('plan_premium_coins', '250', 'number', 'Moedas do plano Premium'),
+('plan_premium_price', '35.99', 'number', 'Preço do plano Premium'),
+('plan_deluxe_coins', '450', 'number', 'Moedas do plano Deluxe'),
+('plan_deluxe_price', '45.99', 'number', 'Preço do plano Deluxe'),
+('pix_expiration_minutes', '30', 'number', 'Tempo de expiração do PIX em minutos'),
+('processing_timeout_minutes', '60', 'number', 'Timeout para processamento em minutos'),
+('max_daily_videos', '20', 'number', 'Máximo de vídeos por dia por usuário'),
+('maintenance_mode', 'false', 'boolean', 'Modo de manutenção do sistema'),
+('admin_notification_chat_id', '', 'string', 'Chat ID para notificações de admin');
+
+-- Inserir usuário admin padrão (substitua com seus dados)
+INSERT INTO users (telegram_id, username, first_name, coins, plan, is_admin) VALUES
+(123456789, 'admin', 'Administrador', 999999, 'infinite', TRUE);
+
+-- Criar views para relatórios
+CREATE VIEW user_statistics AS
+SELECT 
+    u.id,
+    u.username,
+    u.first_name,
+    u.coins,
+    u.plan,
+    COUNT(DISTINCT p.id) as total_processings,
+    COUNT(DISTINCT CASE WHEN p.status = 'completed' THEN p.id END) as completed_processings,
+    COUNT(DISTINCT t.id) as total_transactions,
+    SUM(CASE WHEN t.type = 'purchase' AND t.status = 'completed' THEN t.amount ELSE 0 END) as total_spent,
+    u.created_at
+FROM users u
+LEFT JOIN processings p ON u.id = p.user_id
+LEFT JOIN transactions t ON u.id = t.user_id
+GROUP BY u.id;
+
+CREATE VIEW daily_processing_stats AS
+SELECT 
+    DATE(p.created_at) as processing_date,
+    COUNT(*) as total_processings,
+    COUNT(CASE WHEN p.status = 'completed' THEN 1 END) as completed,
+    COUNT(CASE WHEN p.status = 'failed' THEN 1 END) as failed,
+    SUM(p.coins_used) as total_coins_used
+FROM processings p
+GROUP BY DATE(p.created_at);
+
+CREATE VIEW revenue_stats AS
+SELECT 
+    DATE(t.created_at) as transaction_date,
+    COUNT(*) as total_transactions,
+    SUM(t.amount) as total_revenue,
+    SUM(t.coins_amount) as total_coins_sold
+FROM transactions t
+WHERE t.type = 'purchase' AND t.status = 'completed'
+GROUP BY DATE(t.created_at);
+
+-- Mostrar tabelas criadas
+SHOW TABLES;
 EOF
-    
-    print_message "✅ Schema básico criado"
-fi
+
+# Aplicar schema
+mysql --user=root --password="$MYSQL_ROOT_PASS" youtube_audio_bot < /tmp/schema.sql
+
+print_message "✅ Schema aplicado com sucesso"
 
 # ============================================
-# PASSO 5: CONFIGURAR MYSQL PARA PRODUÇÃO
+# PASSO 5: CONFIGURAR MYSQL
 # ============================================
 print_step "5. CONFIGURANDO MYSQL PARA PRODUÇÃO"
 
 # Backup da configuração atual
-if [ -f /etc/mysql/my.cnf ]; then
-    cp /etc/mysql/my.cnf /etc/mysql/my.cnf.backup
-fi
+cp /etc/mysql/my.cnf /etc/mysql/my.cnf.backup
 
 # Criar configuração otimizada
-mkdir -p /etc/mysql/conf.d
 cat > /etc/mysql/conf.d/youtube-bot.cnf << EOF
 [mysqld]
 # Configurações básicas
@@ -299,13 +414,10 @@ print_message "✅ MySQL configurado para produção"
 print_step "6. INSTALANDO FERRAMENTAS DE BACKUP"
 
 # Instalar ferramentas de backup
-if apt install -y automysqlbackup 2>/dev/null || apt install -y default-mysql-client 2>/dev/null; then
-    print_message "✅ Ferramentas de backup instaladas"
-    
-    # Configurar backup automático se automysqlbackup estiver disponível
-    if command -v automysqlbackup &> /dev/null; then
-        mkdir -p /etc/automysqlbackup
-        cat > /etc/automysqlbackup/automysqlbackup.conf << EOF
+apt install -y automysqlbackup
+
+# Configurar backup automático
+cat > /etc/automysqlbackup/automysqlbackup.conf << EOF
 # Configuração do AutoMySQLBackup para YouTube Audio Bot
 
 # Usuário e senha do MySQL
@@ -332,16 +444,14 @@ COMMCOMP="gzip"
 BACKUP_RETention_DAYS=30
 EOF
 
-        # Criar diretório de backups
-        mkdir -p /var/backups/mysql
-        chmod 700 /var/backups/mysql
+# Criar diretório de backups
+mkdir -p /var/backups/mysql
+chmod 700 /var/backups/mysql
 
-        # Testar backup
-        automysqlbackup /etc/automysqlbackup/automysqlbackup.conf
-    fi
-else
-    print_warning "⚠️  Automysqlbackup não disponível, usando backup manual"
-fi
+# Testar backup
+automysqlbackup /etc/automysqlbackup/automysqlbackup.conf
+
+print_message "✅ Ferramentas de backup instaladas"
 
 # ============================================
 # PASSO 7: CRIAR SCRIPT DE GERENCIAMENTO
@@ -358,26 +468,16 @@ BACKUP_FILE="$BACKUP_DIR/youtube_audio_bot_$TIMESTAMP.sql.gz"
 mkdir -p $BACKUP_DIR
 
 echo "💾 Criando backup do banco de dados..."
-if [ -f /root/.mysql_root_pass ]; then
-    MYSQL_PASS=$(cat /root/.mysql_root_pass | cut -d'=' -f2)
-    mysqldump --single-transaction --quick --lock-tables=false \
-        -u root -p"$MYSQL_PASS" \
-        youtube_audio_bot | gzip > "$BACKUP_FILE"
-    
-    if [ $? -eq 0 ] && [ -f "$BACKUP_FILE" ]; then
-        SIZE=$(du -h "$BACKUP_FILE" | cut -f1)
-        echo "✅ Backup criado: $BACKUP_FILE ($SIZE)"
-        
-        # Manter últimos 7 backups
-        ls -t "$BACKUP_DIR"/*.sql.gz 2>/dev/null | tail -n +8 | xargs -r rm
-        echo "🧹 Mantidos últimos 7 backups"
-    else
-        echo "❌ Falha ao criar backup"
-        rm -f "$BACKUP_FILE"
-    fi
-else
-    echo "❌ Arquivo de senha root não encontrado: /root/.mysql_root_pass"
-fi
+mysqldump --single-transaction --quick --lock-tables=false \
+    -u root -p$(cat /root/.mysql_root_pass | cut -d'=' -f2) \
+    youtube_audio_bot | gzip > $BACKUP_FILE
+
+SIZE=$(du -h $BACKUP_FILE | cut -f1)
+echo "✅ Backup criado: $BACKUP_FILE ($SIZE)"
+
+# Manter últimos 7 backups
+ls -t $BACKUP_DIR/*.sql.gz | tail -n +8 | xargs -r rm
+echo "🧹 Mantidos últimos 7 backups"
 EOF
 
 chmod +x /usr/local/bin/db-backup
@@ -407,21 +507,10 @@ if [ "$CONFIRM" != "SIM" ]; then
     exit 1
 fi
 
-if [ -f /root/.mysql_root_pass ]; then
-    MYSQL_PASS=$(cat /root/.mysql_root_pass | cut -d'=' -f2)
-    echo "🔄 Restaurando banco de dados..."
-    
-    # Descompactar e restaurar
-    gunzip -c "$BACKUP_FILE" | mysql -u root -p"$MYSQL_PASS" youtube_audio_bot
-    
-    if [ $? -eq 0 ]; then
-        echo "✅ Banco de dados restaurado de: $BACKUP_FILE"
-    else
-        echo "❌ Erro ao restaurar banco de dados"
-    fi
-else
-    echo "❌ Arquivo de senha root não encontrado"
-fi
+echo "🔄 Restaurando banco de dados..."
+gunzip -c "$BACKUP_FILE" | mysql -u root -p$(cat /root/.mysql_root_pass | cut -d'=' -f2) youtube_audio_bot
+
+echo "✅ Banco de dados restaurado de: $BACKUP_FILE"
 EOF
 
 chmod +x /usr/local/bin/db-restore
@@ -432,38 +521,34 @@ cat > /usr/local/bin/db-status << 'EOF'
 echo "=== STATUS DO MYSQL ==="
 echo ""
 echo "📊 Versão do MySQL:"
-mysql --version 2>/dev/null || echo "MySQL não encontrado"
+mysql --version
 echo ""
-echo "🔌 Status do serviço:"
-systemctl status mysql --no-pager | grep -E "(Active:|Main PID:|Status:)"
+echo "🔌 Conexões ativas:"
+mysql -u root -p$(cat /root/.mysql_root_pass | cut -d'=' -f2) -e "SHOW STATUS LIKE 'Threads_connected';"
 echo ""
-if [ -f /root/.mysql_root_pass ]; then
-    MYSQL_PASS=$(cat /root/.mysql_root_pass | cut -d'=' -f2)
-    echo "💾 Uso de storage:"
-    mysql -u root -p"$MYSQL_PASS" youtube_audio_bot -e "
+echo "💾 Uso de storage:"
+mysql -u root -p$(cat /root/.mysql_root_pass | cut -d'=' -f2) youtube_audio_bot -e "
 SELECT 
     table_schema as 'Database',
     SUM(data_length + index_length) / 1024 / 1024 as 'Size (MB)'
 FROM information_schema.tables
 WHERE table_schema = 'youtube_audio_bot'
-GROUP BY table_schema;" 2>/dev/null || echo "Não foi possível conectar ao banco"
-    
-    echo ""
-    echo "📈 Tabelas e registros:"
-    mysql -u root -p"$MYSQL_PASS" youtube_audio_bot -e "
+GROUP BY table_schema;
+"
+echo ""
+echo "📈 Tabelas e registros:"
+mysql -u root -p$(cat /root/.mysql_root_pass | cut -d'=' -f2) youtube_audio_bot -e "
 SELECT 
     TABLE_NAME as 'Tabela',
     TABLE_ROWS as 'Registros',
     ROUND((DATA_LENGTH + INDEX_LENGTH) / 1024 / 1024, 2) as 'Tamanho (MB)'
 FROM information_schema.TABLES
 WHERE TABLE_SCHEMA = 'youtube_audio_bot'
-ORDER BY TABLE_ROWS DESC;" 2>/dev/null || echo "Não foi possível listar tabelas"
-else
-    echo "❌ Arquivo de senha root não encontrado"
-fi
+ORDER BY TABLE_ROWS DESC;
+"
 echo ""
-echo "📅 Últimos backups:"
-ls -lt /var/backups/mysql/manual/*.sql.gz 2>/dev/null | head -5 || echo "Nenhum backup encontrado"
+echo "📅 Último backup:"
+ls -lt /var/backups/mysql/manual/*.sql.gz 2>/dev/null | head -5
 EOF
 
 chmod +x /usr/local/bin/db-status
@@ -475,46 +560,25 @@ print_message "✅ Scripts de gerenciamento criados"
 # ============================================
 print_step "8. CONFIGURANDO BACKUP AUTOMÁTICO"
 
-# Adicionar ao crontab se não existir
-if ! crontab -l 2>/dev/null | grep -q "db-backup"; then
-    (crontab -l 2>/dev/null; echo "# Backup diário do banco de dados às 2 AM") | crontab -
-    (crontab -l 2>/dev/null; echo "0 2 * * * /usr/local/bin/db-backup") | crontab -
-    (crontab -l 2>/dev/null; echo "# Limpeza de backups antigos semanalmente") | crontab -
-    (crontab -l 2>/dev/null; echo "0 3 * * 0 find /var/backups/mysql -name '*.gz' -mtime +30 -delete") | crontab -
-    print_message "✅ Backup automático configurado no crontab"
-else
-    print_message "✅ Backup automático já configurado"
-fi
+# Adicionar ao crontab
+(crontab -l 2>/dev/null; echo "# Backup diário do banco de dados às 2 AM") | crontab -
+(crontab -l 2>/dev/null; echo "0 2 * * * /usr/local/bin/db-backup") | crontab -
+(crontab -l 2>/dev/null; echo "# Limpeza de backups antigos semanalmente") | crontab -
+(crontab -l 2>/dev/null; echo "0 3 * * 0 find /var/backups/mysql -name '*.gz' -mtime +30 -delete") | crontab -
+
+print_message "✅ Backup automático configurado"
 
 # ============================================
 # PASSO 9: FINALIZAÇÃO
 # ============================================
 print_step "9. FINALIZANDO INSTALAÇÃO"
 
-# Testar conexão com usuário do bot
-print_message "Testando conexão com o banco de dados..."
+# Testar conexão
 if mysql -u youtube_bot_user -p'BotSecurePass123!' -e "USE youtube_audio_bot; SELECT '✅ Conexão OK' as status;" 2>/dev/null; then
     print_message "✅ Conexão com o banco de dados testada com sucesso"
-    
-    # Mostrar informações das tabelas criadas
-    TABLE_INFO=$(mysql -u youtube_bot_user -p'BotSecurePass123!' youtube_audio_bot -e "SHOW TABLES;" 2>/dev/null)
-    if [ $? -eq 0 ]; then
-        echo ""
-        print_message "📋 Tabelas criadas no banco:"
-        echo "$TABLE_INFO" | while read -r table; do
-            echo "   • $table"
-        done
-    fi
 else
-    print_warning "⚠️  Falha na conexão com usuário do bot"
-    print_message "Testando conexão root..."
-    
-    if [ -f /root/.mysql_root_pass ]; then
-        MYSQL_PASS=$(cat /root/.mysql_root_pass | cut -d'=' -f2)
-        if mysql -u root -p"$MYSQL_PASS" -e "USE youtube_audio_bot; SHOW TABLES;" 2>/dev/null; then
-            print_message "✅ Conexão root funciona, usuário do bot pode precisar de ajustes"
-        fi
-    fi
+    print_error "❌ Falha na conexão com o banco de dados"
+    print_warning "Verifique as credenciais em /root/.bot_db_creds"
 fi
 
 # Resumo da instalação
@@ -528,7 +592,6 @@ echo "   Host: localhost"
 echo "   Banco: youtube_audio_bot"
 echo "   Usuário: youtube_bot_user"
 echo "   Senha: BotSecurePass123! (altere em produção)"
-echo "   Schema: Baixado do GitHub: $SCHEMA_URL"
 echo ""
 echo "🔧 COMANDOS DISPONÍVEIS:"
 echo "   db-status      - Ver status do banco"
@@ -547,9 +610,5 @@ echo "⚠️  IMPORTANTE:"
 echo "   1. Altere a senha do usuário do bot em produção!"
 echo "   2. Configure firewall para permitir apenas localhost"
 echo "   3. Monitore os logs: /var/log/mysql/error.log"
-echo "   4. Schema completo em: https://github.com/Marcelo1408/youtube-audio-bot"
 echo ""
 echo "================================================"
-
-# Limpar arquivo temporário
-rm -f /tmp/schema.sql
